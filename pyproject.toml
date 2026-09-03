@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "call-dibs"
+version = "0.3.0"
+description = "Call dibs on shared stuff — a one-file lock ledger for humans and AI agents."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+
+[project.scripts]
+dibs = "dibs:main"
+
+[tool.setuptools]
+py-modules = ["dibs"]
