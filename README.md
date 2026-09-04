@@ -127,6 +127,10 @@ Install [SwiftBar](https://swiftbar.app), then add the plugin:
 open "swiftbar://addplugin?src=https://raw.githubusercontent.com/NeoMarcoPolo/call-dibs/main/contrib/dibs.5s.sh"
 ```
 
+Start the UI when you want it with `open -a SwiftBar`; quit it from the
+dropdown's **Quit** item. (SwiftBar only runs when launched — set it as a
+login item if you'd rather have it always there.)
+
 ## How it works
 
 One JSON file per resource under `~/.dibs/` (override with `DIBS_DIR`). A

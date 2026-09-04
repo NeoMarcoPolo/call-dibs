@@ -38,7 +38,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")

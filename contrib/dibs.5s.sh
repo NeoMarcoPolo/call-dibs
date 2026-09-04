@@ -1,12 +1,11 @@
 #!/bin/bash
 # call-dibs — SwiftBar/xbar menu bar plugin.
 # Top bar shows "dibs ✋<n>" when n resources are claimed, "dibs ✓" when all free.
-# Install (SwiftBar):
-#   open "swiftbar://addplugin?src=https://raw.githubusercontent.com/NeoMarcoPolo/call-dibs/main/contrib/dibs.5s.sh"
-# or copy this file into your plugins folder. ".5s" in the name = refresh every 5 s.
+# Start the UI with:  open -a SwiftBar      Quit it from the dropdown.
+# ".5s" in the filename = refresh every 5 s.
 #
 # <xbar.title>call-dibs</xbar.title>
-# <xbar.version>v0.3.0</xbar.version>
+# <xbar.version>v0.3.1</xbar.version>
 # <xbar.desc>Who has claimed which shared device (dibs ledger)</xbar.desc>
 # <xbar.dependencies>python3,dibs</xbar.dependencies>
 #
@@ -17,4 +16,7 @@
 # <swiftbar.hideSwiftBar>true</swiftbar.hideSwiftBar>
 
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-exec dibs status --xbar
+
+dibs status --xbar || echo "dibs ⚠ | color=#e05d44"
+echo "---"
+echo "Quit | bash=/usr/bin/pkill param1=-x param2=SwiftBar terminal=false"
