@@ -30,7 +30,7 @@ on run argv
   display dialog "Force-release " & item 1 of argv & "?" & return & return & item 2 of argv with title "dibs" buttons {"Cancel", "Force release"} default button "Cancel" cancel button "Cancel" with icon caution
 end run
 OSA
-  dibs release "$2" --owner "$holder" >/dev/null 2>&1
+  dibs release "$2" --owner="$holder" >/dev/null 2>&1
   exit 0
 fi
 
