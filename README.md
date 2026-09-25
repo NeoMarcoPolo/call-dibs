@@ -151,9 +151,10 @@ login item if you'd rather have it always there.)
 One JSON file per resource under `~/.dibs/` (override with `DIBS_DIR`). A
 claim is an atomic `O_CREAT|O_EXCL` create, so racing claimers get exactly
 one winner. Locks are advisory and are held until released — there is no
-expiry. A waiting claim keeps a small ticket in `~/.dibs/queue/` and refreshes it
-every poll; a ticket that goes 15 s without a refresh is dropped, so a
-waiter that died never blocks the line. The ledger is per-machine by default; point `DIBS_DIR` at a shared
+expiry. A waiting claim keeps a small ticket in `~/.dibs/queue/` and
+refreshes it every poll; a ticket is dropped after 15 s without a refresh
+(longer with a slower `--poll`), so a waiter that died never blocks the
+line. The ledger is per-machine by default; point `DIBS_DIR` at a shared
 directory to span machines.
 
 ## Contributing
