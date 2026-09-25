@@ -49,7 +49,7 @@ __version__ = "0.4.0"
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
 QUEUE = LEDGER / "queue"  # one ticket per waiting claim
 STALE = 15  # seconds without a heartbeat before a waiter counts as gone
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def now_iso():
@@ -449,8 +449,10 @@ def xbar_safe(s):
     """A ledger-derived string (owner, note, resource/group name), made
     safe to interpolate into an xbar/SwiftBar menu line: those lines are
     '|'-delimited key=value pairs, so an unescaped '|' could inject a fake
-    param and a newline could inject a fake extra menu line/item."""
-    return str(s).replace("|", "¦").replace("\r", " ").replace("\n", " ")
+    param, and any line break could inject a fake extra menu line/item.
+    SwiftBar splits on every Unicode line break (\\v, \\f, \\x85, \\u2028,
+    \\u2029, ...), not just \\r/\\n, so fold all of them via splitlines()."""
+    return " ".join(str(s).splitlines()).replace("|", "¦")
 
 
 def cmd_status(a):
@@ -484,9 +486,11 @@ def cmd_status(a):
             note = f" · {xbar_safe(r['note'])}" if r.get("note") else ""
             grp = f" · {xbar_safe(r['group'])}" if r.get("group") else ""
             print(f"{name} — {xbar_safe(r['owner'])}{note}{grp} | color=#e05d44")
-            if plugin and NAME_RE.match(r["resource"]):
+            if (plugin and isinstance(r["resource"], str)
+                    and NAME_RE.match(r["resource"])):
                 print(xbar_force(plugin, r["resource"], f"Force release {name}…"))
-                if r.get("group") and NAME_RE.match(r["group"]):
+                if (r.get("group") and isinstance(r["group"], str)
+                        and NAME_RE.match(r["group"])):
                     members = ", ".join(xbar_safe(h["resource"]) for h in held
                                         if h.get("group") == r["group"])
                     print(xbar_force(plugin, r["group"],
@@ -547,6 +551,12 @@ def cmd_run(a):
               file=sys.stderr)
         return 1
     a.resources = [a.resource]
+    # Fix the owner now so the `finally` below compares against the same
+    # value we claimed with. Recomputing default_owner() there would embed
+    # whatever our *current* parent pid is, which can differ from claim
+    # time if our parent has already exited (e.g. a backgrounded shell) —
+    # the lock would then look like someone else's and never be released.
+    a.owner = a.owner or default_owner()
     rc = cmd_claim(a)
     if rc != 0:
         return rc
@@ -555,15 +565,15 @@ def cmd_run(a):
     finally:
         # The command may have run long enough for someone to force-release
         # and re-claim this resource; only drop the lock if it's still ours.
-        owner = a.owner or default_owner()
+        # A non-dict record (corrupt/hand-edited) is treated as not ours.
         rec = read_lock(lock_path(a.resource))
-        if rec and rec.get("owner") == owner:
+        if isinstance(rec, dict) and rec.get("owner") == a.owner:
             try:
                 lock_path(a.resource).unlink()
             except FileNotFoundError:
                 pass
             print(f"released {a.resource}", file=sys.stderr)
-        elif rec:
+        elif isinstance(rec, dict):
             print(f"left {a.resource} alone: now held by {rec.get('owner')}",
                   file=sys.stderr)
 

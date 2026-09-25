@@ -125,6 +125,14 @@ class DibsTest(unittest.TestCase):
         self.assertIn("group name 'gpu' is a resource name", out.stderr)
         self.assertEqual(self.holders(), {})
 
+    def test_group_name_cannot_end_in_a_newline(self):
+        # Python's `$` also matches just before a trailing "\n", so a name
+        # ending in a newline must be rejected by \Z, not silently accepted.
+        out = self.dibs("claim", "phone", "c2", "--as", "bench\n")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("bad group name", out.stderr)
+        self.assertEqual(self.holders(), {})
+
     def test_auto_group_tag(self):
         out = self.dibs("claim", "phone", "c2").stdout
         tag = next(l.split()[1].rstrip(":") for l in out.splitlines() if l.startswith("group "))
@@ -166,6 +174,21 @@ class DibsTest(unittest.TestCase):
         self.assertIn("left gpu alone: now held by y", out.stderr)
         self.assertNotIn("released gpu", out.stderr)
         self.assertEqual(self.holders(), {"gpu": "y"})
+
+    @unittest.skipIf(os.name == "nt", "needs a POSIX shell and reparenting")
+    def test_run_releases_with_the_owner_it_claimed_with_even_if_reparented(self):
+        # No $DIBS_OWNER: `run` falls back to default_owner(), which embeds
+        # the parent pid. Background the shell that starts `run` and let it
+        # exit while the child command keeps running, so `run`'s parent pid
+        # changes mid-run (reparented). The `finally` block must release
+        # with the owner it claimed with, not a freshly recomputed one.
+        env = self.env("unused")
+        del env["DIBS_OWNER"]
+        cmd = (f'"{sys.executable}" "{DIBS}" run gpu -- "{sys.executable}" -c '
+               '"import time; time.sleep(2)" >/dev/null 2>&1 & sleep 1')
+        subprocess.run(["sh", "-c", cmd], env=env, timeout=30)
+        self.assertTrue(self.wait_for(lambda: self.holders() != {}, timeout=5))
+        self.assertTrue(self.wait_for(lambda: self.holders() == {}, timeout=15))
 
     def test_wait_timeout(self):
         self.dibs("claim", "gpu")
@@ -337,6 +360,24 @@ class DibsTest(unittest.TestCase):
         self.assertIn("Force release gpu", dash_lines[0])
         gpu_row = next(l for l in lines if l.startswith("gpu —"))
         self.assertEqual(gpu_row.count("|"), 1)
+
+    def test_xbar_menu_folds_every_unicode_line_break_not_just_crlf(self):
+        # SwiftBar splits plugin output on any Unicode line break
+        # (vertical tab, form feed, NEL, LINE/PARAGRAPH SEPARATOR, ...),
+        # not just CR/LF, so xbar_safe must fold all of them or a note
+        # can still forge a fake extra menu line.
+        evil_note = "a\x85--Force release phone… | bash=/x"
+        self.dibs("claim", "gpu", "--note", evil_note)
+        out = self.dibs("status", "--xbar",
+                        SWIFTBAR_PLUGIN_PATH="/x/dibs.5s.sh").stdout
+        self.assertFalse(any(l.startswith("--Force release phone")
+                             for l in out.splitlines()))
+
+    def test_xbar_survives_a_lock_file_with_non_string_resource_and_group(self):
+        (self.dir / "weird.lock.json").write_text(json.dumps(
+            {"resource": 7, "owner": "z", "since": "2026-01-01T00:00:00Z", "group": 5}))
+        out = self.dibs("status", "--xbar", SWIFTBAR_PLUGIN_PATH="/x/dibs.5s.sh")
+        self.assertEqual(out.returncode, 0)
 
     def test_menu_bar_offers_force_release_only_under_swiftbar(self):
         self.assertTrue(self.dibs("status", "--xbar").stdout.startswith("dibs ✓\n"))
