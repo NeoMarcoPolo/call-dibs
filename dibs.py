@@ -41,6 +41,8 @@ from pathlib import Path
 __version__ = "0.3.1"
 
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
+QUEUE = LEDGER / "queue"  # one ticket per waiting claim
+STALE = 15  # seconds without a heartbeat before a waiter counts as gone
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -49,7 +51,10 @@ def now_iso():
 
 
 def age_str(ts):
-    since = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    try:
+        since = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return "?"
     secs = int((datetime.now(timezone.utc) - since).total_seconds())
     if secs < 90:
         return f"{secs}s"
@@ -162,6 +167,102 @@ def try_claim_one(resource, owner, note, group=None):
             return cur
 
 
+def current_locks():
+    """Every live lock record, sorted by resource."""
+    LEDGER.mkdir(parents=True, exist_ok=True)
+    locks = []
+    for p in sorted(LEDGER.glob("*.lock.json")):
+        rec = read_lock(p)
+        if rec:
+            rec.setdefault("resource", p.name[:-len(".lock.json")])
+            locks.append(rec)
+    return locks
+
+
+def read_ticket(path):
+    """A waiter's ticket, or None if the file isn't one."""
+    try:
+        t = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if (isinstance(t, dict) and {"id", "owner", "resources", "since", "t"} <= t.keys()
+            and isinstance(t["resources"], list) and isinstance(t["t"], (int, float))):
+        return t
+    return None
+
+
+def live_tickets():
+    """Waiting claims, oldest first. A ticket whose waiter stopped
+    heartbeating is skipped and cleaned up, as is anything else that has
+    sat in the queue dir unreadable."""
+    out = []
+    for p in QUEUE.glob("*.json"):
+        try:
+            age = time.time() - p.stat().st_mtime
+        except OSError:
+            continue
+        t = read_ticket(p)
+        poll = t.get("poll") if t else None
+        limit = max(STALE, 3 * poll if isinstance(poll, (int, float)) else 0)
+        if t and age <= limit:
+            out.append(t)
+        elif age > STALE:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    return sorted(out, key=lambda t: (t["t"], str(t["id"])))
+
+
+def next_in_line(resources, owner, me=None):
+    """The waiter ahead of this claim who is next for one of `resources`,
+    or None. Oldest first, a waiter whose devices are all free (and not
+    promised to someone older) is next for them; a waiter still blocked
+    elsewhere reserves nothing. Without a ticket (`me`) a claim stands at
+    the back of the line. Tickets never block their own owner."""
+    taken = {rec["resource"]: rec.get("owner") for rec in current_locks()}
+    for t in live_tickets():
+        if t["id"] == me:
+            break
+        if all(taken.get(r, t["owner"]) == t["owner"] for r in t["resources"]):
+            if t["owner"] != owner and set(resources) & set(t["resources"]):
+                return t
+            taken.update((r, t["owner"]) for r in t["resources"])
+    return None
+
+
+def busy_reason(resources, owner, me=None):
+    """Why this claim can't go ahead right now, or None if it can try."""
+    for r in resources:
+        rec = read_lock(lock_path(r))
+        if rec and rec.get("owner") != owner:
+            return holder_line(r, rec)
+    t = next_in_line(resources, owner, me)
+    if t is None:
+        return None
+    r = next(r for r in resources if r in t["resources"])
+    note = f' — "{t["note"]}"' if t.get("note") else ""
+    return (f"{r}: free, but next in line is {t['owner']} "
+            f"(waiting {age_str(t['since'])}){note}")
+
+
+def take_all(resources, owner, note, group):
+    """Take every resource or none. Returns None, or why not."""
+    got = []
+    for r in resources:
+        res = try_claim_one(r, owner, note, group)
+        if res == "claimed":
+            got.append(r)
+        elif res != "yours":
+            for g in got:  # roll back this call's partial set
+                try:
+                    lock_path(g).unlink()
+                except FileNotFoundError:
+                    pass
+            return holder_line(r, res)
+    return None
+
+
 def cmd_claim(a):
     """All-or-nothing: on any BUSY, locks newly taken by this call are rolled
     back (sorted claim order keeps overlapping sets deadlock-free). Claiming
@@ -176,31 +277,19 @@ def cmd_claim(a):
         raise SystemExit(f"dibs: bad group name {group!r}")
     deadline = time.time() + a.timeout if a.timeout else None
     while True:
-        got, blocker = [], None
-        for r in resources:
-            res = try_claim_one(r, owner, a.note, group)
-            if res == "claimed":
-                got.append(r)
-            elif res != "yours":
-                blocker = (r, res)
-                break
-        if blocker is None:
+        why = busy_reason(resources, owner) or take_all(resources, owner, a.note, group)
+        if why is None:
             for r in resources:
                 print(f"claimed {r} as {owner}")
             if group:
                 print(f"group {group}: {', '.join(resources)} "
                       f"(discard with: dibs release {group})")
             return 0
-        for r in got:  # roll back this call's partial set
-            try:
-                lock_path(r).unlink()
-            except FileNotFoundError:
-                pass
         if not a.wait:
-            print("BUSY " + holder_line(*blocker), file=sys.stderr)
+            print("BUSY " + why, file=sys.stderr)
             return 2
         if deadline and time.time() > deadline:
-            print("timeout waiting; " + holder_line(*blocker), file=sys.stderr)
+            print("timeout waiting; " + why, file=sys.stderr)
             return 4
         time.sleep(a.poll)
 
@@ -208,9 +297,7 @@ def cmd_claim(a):
 def resolve_targets(names):
     """Each name is a resource with a live lock, or a group tag: expands to
     every locked resource carrying that tag. Unknown names pass through."""
-    LEDGER.mkdir(parents=True, exist_ok=True)
-    locks = [rec for p in sorted(LEDGER.glob("*.lock.json"))
-             if (rec := read_lock(p))]
+    locks = current_locks()
     out = []
     for name in names:
         members = [r["resource"] for r in locks if r.get("group") == name]
