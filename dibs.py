@@ -405,6 +405,12 @@ def cmd_release(a):
     return rc
 
 
+def xbar_force(plugin, name, label):
+    """A SwiftBar submenu item that asks the plugin to force-release `name`."""
+    return (f'--{label} | bash="{plugin}" param1=force param2={name} '
+            "terminal=false refresh=true")
+
+
 def cmd_status(a):
     rows = ledger_rows()
     if a.resource:
@@ -418,17 +424,33 @@ def cmd_status(a):
         return 0
     if a.xbar:
         held = [r for r in rows if r.get("owner")]
-        print(f"dibs ✋{len(held)}" if held else "dibs ✓")
+        waiting = live_tickets()
+        counts = ([f"✋{len(held)}"] if held else []) + ([f"⏳{len(waiting)}"] if waiting else [])
+        print("dibs " + (" ".join(counts) or "✓"))
         print("---")
         if not rows:
             print("no resources.json yet | color=gray")
+        plugin = os.environ.get("SWIFTBAR_PLUGIN_PATH")  # SwiftBar sets it; xbar doesn't
         for r in rows:
-            if r.get("owner"):
-                note = f" · {r['note']}" if r.get("note") else ""
-                grp = f" · {r['group']}" if r.get("group") else ""
-                print(f"{r['resource']} — {r['owner']}{note}{grp} | color=#e05d44")
-            else:
+            if not r.get("owner"):
                 print(f"{r['resource']} — free | color=#44a05d")
+                continue
+            note = f" · {r['note']}" if r.get("note") else ""
+            grp = f" · {r['group']}" if r.get("group") else ""
+            print(f"{r['resource']} — {r['owner']}{note}{grp} | color=#e05d44")
+            if plugin:
+                print(xbar_force(plugin, r["resource"], f"Force release {r['resource']}…"))
+                if r.get("group"):
+                    members = ", ".join(h["resource"] for h in held
+                                        if h.get("group") == r["group"])
+                    print(xbar_force(plugin, r["group"],
+                                     f"Force release group {r['group']} ({members})…"))
+        if waiting:
+            print("---")
+            print("Waiting | color=gray")
+            for t in waiting:
+                print(f"⏳ {t['owner']} · {age_str(t['since'])} — "
+                      f"{', '.join(t['resources'])}")
         return 0
     if not rows:
         print(NO_REGISTRY, file=sys.stderr)

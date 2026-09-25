@@ -267,6 +267,20 @@ class DibsTest(unittest.TestCase):
         self.assertIn("phone: held by a", text)
         self.assertNotIn("gpu", text)
 
+    def test_menu_bar_offers_force_release_only_under_swiftbar(self):
+        self.assertTrue(self.dibs("status", "--xbar").stdout.startswith("dibs ✓\n"))
+        self.dibs("claim", "phone", "c2", "--as", "bench")
+        self.ticket("b", "gpu")
+        plain = self.dibs("status", "--xbar").stdout
+        self.assertTrue(plain.startswith("dibs ✋2 ⏳1\n"))
+        self.assertIn("\n⏳ b · ", plain)
+        self.assertNotIn("Force release", plain)
+        bar = self.dibs("status", "--xbar",
+                        SWIFTBAR_PLUGIN_PATH="/x/My Plugins/dibs.5s.sh").stdout
+        self.assertIn('--Force release phone… | bash="/x/My Plugins/dibs.5s.sh" '
+                      "param1=force param2=phone terminal=false refresh=true", bar)
+        self.assertIn("--Force release group bench (c2, phone)… | ", bar)
+
 
 if __name__ == "__main__":
     unittest.main()
