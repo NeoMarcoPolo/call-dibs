@@ -249,6 +249,24 @@ class DibsTest(unittest.TestCase):
         p.wait(timeout=10)
         self.assertEqual(self.holders(), {"gpu": "a"})  # as in 0.3: not released
 
+    def test_status_shows_who_is_waiting(self):
+        self.dibs("claim", "gpu")
+        self.ticket("b", "gpu", "phone")
+        text = self.dibs("status").stdout
+        self.assertRegex(text, r"gpu: held by a[^\n]*\n  queue: b \(\d+s, \+phone\)\n")
+        self.assertRegex(text, r"phone: free[^\n]*\n  queue: b \(\d+s, \+gpu\)\n")
+        rows = {r["resource"]: r for r in json.loads(self.dibs("status", "--json").stdout)}
+        self.assertEqual([w["owner"] for w in rows["gpu"]["waiting"]], ["b"])
+        self.assertEqual(rows["phone"]["waiting"][0]["resources"], ["gpu", "phone"])
+        self.assertNotIn("waiting", rows["c2"])
+
+    def test_status_of_a_group_tag_lists_its_members(self):
+        self.dibs("claim", "phone", "c2", "--as", "bench")
+        text = self.dibs("status", "bench").stdout
+        self.assertIn("c2: held by a", text)
+        self.assertIn("phone: held by a", text)
+        self.assertNotIn("gpu", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,21 +124,30 @@ def holder_line(resource, rec):
             f"since {rec['since']} ({age_str(rec['since'])} ago){note}{grp}")
 
 
+def queue_line(resource, waiting):
+    def one(w):
+        also = " ".join(f"+{r}" for r in w["resources"] if r != resource)
+        return f"{w['owner']} ({age_str(w['since'])}{', ' + also if also else ''})"
+    return "  queue: " + ", ".join(one(w) for w in waiting)
+
+
 def ledger_rows():
-    """All resources: registry entries plus any live locks."""
-    LEDGER.mkdir(parents=True, exist_ok=True)
+    """All resources: registry entries plus any live locks, each with the
+    line waiting for it (the "waiting" key only when someone waits)."""
     reg = registry() or {}
     rows = {name: {"resource": name, "description": desc}
             for name, desc in sorted(reg.items())
             if isinstance(desc, str)}  # list values are groups, not resources
-    for p in sorted(LEDGER.glob("*.lock.json")):
-        rec = read_lock(p)
-        if rec is None:
-            continue
-        name = rec.get("resource", p.name[:-len(".lock.json")])
+    for rec in current_locks():
+        name = rec["resource"]
         desc = reg.get(name, "")
         rec.setdefault("description", desc if isinstance(desc, str) else "")
         rows[name] = {**rows.get(name, {}), **rec}
+    for t in live_tickets():
+        for r in t["resources"]:
+            rows.setdefault(r, {"resource": r, "description": ""}).setdefault(
+                "waiting", []).append(
+                {k: t.get(k) for k in ("owner", "since", "note", "resources", "host")})
     return list(rows.values())
 
 
@@ -399,7 +408,8 @@ def cmd_release(a):
 def cmd_status(a):
     rows = ledger_rows()
     if a.resource:
-        rows = [r for r in rows if r["resource"] == a.resource]
+        names = set(resolve_targets([a.resource]))
+        rows = [r for r in rows if r["resource"] in names]
         if not rows:
             print(f"{a.resource}: free")
             return 0
@@ -429,6 +439,8 @@ def cmd_status(a):
         else:
             desc = f"  ({r['description']})" if r.get("description") else ""
             print(f"{r['resource']}: free{desc}")
+        if r.get("waiting"):
+            print(queue_line(r["resource"], r["waiting"]))
     return 0
 
 
@@ -493,6 +505,8 @@ def cmd_watch(a):
                     print("  🔴 " + holder_line(r["resource"], r))
                 else:
                     print(f"  🟢 {r['resource']}: free")
+                if r.get("waiting"):
+                    print("  " + queue_line(r["resource"], r["waiting"]))
             sys.stdout.flush()
             time.sleep(a.poll)
     except KeyboardInterrupt:
