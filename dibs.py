@@ -188,7 +188,7 @@ def current_locks():
     locks = []
     for p in sorted(LEDGER.glob("*.lock.json")):
         rec = read_lock(p)
-        if rec:
+        if isinstance(rec, dict):
             rec.setdefault("resource", p.name[:-len(".lock.json")])
             locks.append(rec)
     return locks
@@ -201,27 +201,39 @@ def read_ticket(path):
     except (OSError, ValueError):
         return None
     if (isinstance(t, dict) and {"id", "owner", "resources", "since", "t"} <= t.keys()
-            and isinstance(t["resources"], list) and isinstance(t["t"], (int, float))):
+            and isinstance(t["id"], str) and isinstance(t["owner"], str)
+            and isinstance(t["resources"], list)
+            and all(isinstance(r, str) for r in t["resources"])
+            and isinstance(t["t"], (int, float))):
         return t
     return None
 
 
 def live_tickets():
     """Waiting claims, oldest first. A ticket whose waiter stopped
-    heartbeating is skipped and cleaned up, as is anything else that has
-    sat in the queue dir unreadable."""
+    heartbeating is removed, as dibs wrote it and knows it's abandoned.
+    Anything else in the queue dir — unreadable, or not a ticket dibs
+    wrote — is skipped and left on disk, however old; the queue dir may
+    also not exist as a directory at all, in which case there's simply
+    nothing waiting."""
     out = []
-    for p in QUEUE.glob("*.json"):
+    try:
+        paths = list(QUEUE.glob("*.json"))
+    except OSError:
+        paths = []
+    for p in paths:
         try:
             age = time.time() - p.stat().st_mtime
         except OSError:
             continue
         t = read_ticket(p)
-        poll = t.get("poll") if t else None
+        if t is None:
+            continue  # not a ticket dibs wrote; never ours to delete
+        poll = t.get("poll")
         limit = max(STALE, 3 * poll if isinstance(poll, (int, float)) else 0)
-        if t and age <= limit:
+        if age <= limit:
             out.append(t)
-        elif age > STALE:
+        else:
             try:
                 p.unlink()
             except OSError:
@@ -302,7 +314,10 @@ def heartbeat(t):
     try:
         os.utime(QUEUE / f"{t['id']}.json")
     except FileNotFoundError:
-        write_ticket(t)
+        try:
+            write_ticket(t)
+        except OSError:
+            pass  # queue dir unwritable right now; the next beat retries
     except OSError:
         pass  # e.g. Windows while a reader has it open; the next beat will do
 
@@ -340,8 +355,13 @@ def cmd_claim(a):
         group = "g-" + os.urandom(3).hex()
     if group and not NAME_RE.match(group):
         raise SystemExit(f"dibs: bad group name {group!r}")
+    if group and group in (registry() or {}):
+        raise SystemExit(f"dibs: group name {group!r} is a resource name; pick another")
     deadline = time.time() + a.timeout if a.timeout else None
     ticket = None
+    tried_to_join = False  # only attempt join_line() once; never re-retry per poll
+    term_installed = False
+    term_prev_handler = signal.SIG_DFL
     try:
         while True:
             why = (busy_reason(resources, owner, ticket and ticket["id"])
@@ -359,18 +379,27 @@ def cmd_claim(a):
             if deadline and time.time() > deadline:
                 print("timeout waiting; " + why, file=sys.stderr)
                 return 4
-            if ticket is None:
-                signal.signal(signal.SIGTERM, _exit_on_term)
-                ticket = join_line(resources, owner, a.note, a.poll)
-                print(f"queued for {', '.join(resources)} — {why}; "
-                      f"{ahead_of(ticket)} ahead", file=sys.stderr)
-            else:
+            if ticket is None and not tried_to_join:
+                tried_to_join = True
+                term_prev_handler = signal.getsignal(signal.SIGTERM)
+                if term_prev_handler == signal.SIG_DFL:
+                    signal.signal(signal.SIGTERM, _exit_on_term)
+                    term_installed = True
+                try:
+                    ticket = join_line(resources, owner, a.note, a.poll)
+                    print(f"queued for {', '.join(resources)} — {why}; "
+                          f"{ahead_of(ticket)} ahead", file=sys.stderr, flush=True)
+                except OSError as e:
+                    print(f"not queued ({e}); waiting without a place in line",
+                          file=sys.stderr, flush=True)
+            elif ticket is not None:
                 heartbeat(ticket)
             time.sleep(a.poll)
     finally:
         if ticket:
             leave_line(ticket)
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)  # `run` keeps 0.3 behaviour
+        if term_installed:
+            signal.signal(signal.SIGTERM, term_prev_handler)  # `run` keeps 0.3 behaviour
 
 
 def resolve_targets(names):
@@ -416,13 +445,24 @@ def xbar_force(plugin, name, label):
             "terminal=false refresh=true")
 
 
+def xbar_safe(s):
+    """A ledger-derived string (owner, note, resource/group name), made
+    safe to interpolate into an xbar/SwiftBar menu line: those lines are
+    '|'-delimited key=value pairs, so an unescaped '|' could inject a fake
+    param and a newline could inject a fake extra menu line/item."""
+    return str(s).replace("|", "¦").replace("\r", " ").replace("\n", " ")
+
+
 def cmd_status(a):
     rows = ledger_rows()
     if a.resource:
         names = set(resolve_targets([a.resource]))
         rows = [r for r in rows if r["resource"] in names]
         if not rows:
-            print(f"{a.resource}: free")
+            if a.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print(f"{a.resource}: free")
             return 0
     if a.json:
         print(json.dumps(rows, indent=2))
@@ -437,25 +477,26 @@ def cmd_status(a):
             print("no resources.json yet | color=gray")
         plugin = os.environ.get("SWIFTBAR_PLUGIN_PATH")  # SwiftBar sets it; xbar doesn't
         for r in rows:
+            name = xbar_safe(r["resource"])
             if not r.get("owner"):
-                print(f"{r['resource']} — free | color=#44a05d")
+                print(f"{name} — free | color=#44a05d")
                 continue
-            note = f" · {r['note']}" if r.get("note") else ""
-            grp = f" · {r['group']}" if r.get("group") else ""
-            print(f"{r['resource']} — {r['owner']}{note}{grp} | color=#e05d44")
-            if plugin:
-                print(xbar_force(plugin, r["resource"], f"Force release {r['resource']}…"))
-                if r.get("group"):
-                    members = ", ".join(h["resource"] for h in held
+            note = f" · {xbar_safe(r['note'])}" if r.get("note") else ""
+            grp = f" · {xbar_safe(r['group'])}" if r.get("group") else ""
+            print(f"{name} — {xbar_safe(r['owner'])}{note}{grp} | color=#e05d44")
+            if plugin and NAME_RE.match(r["resource"]):
+                print(xbar_force(plugin, r["resource"], f"Force release {name}…"))
+                if r.get("group") and NAME_RE.match(r["group"]):
+                    members = ", ".join(xbar_safe(h["resource"]) for h in held
                                         if h.get("group") == r["group"])
                     print(xbar_force(plugin, r["group"],
-                                     f"Force release group {r['group']} ({members})…"))
+                                     f"Force release group {xbar_safe(r['group'])} ({members})…"))
         if waiting:
             print("---")
             print("Waiting | color=gray")
             for t in waiting:
-                print(f"⏳ {t['owner']} · {age_str(t['since'])} — "
-                      f"{', '.join(t['resources'])}")
+                resources = ", ".join(xbar_safe(x) for x in t["resources"])
+                print(f"⏳ {xbar_safe(t['owner'])} · {age_str(t['since'])} — {resources}")
         return 0
     if not rows:
         print(NO_REGISTRY, file=sys.stderr)
@@ -512,11 +553,19 @@ def cmd_run(a):
     try:
         return subprocess.call(argv)
     finally:
-        try:
-            lock_path(a.resource).unlink()
-        except FileNotFoundError:
-            pass
-        print(f"released {a.resource}", file=sys.stderr)
+        # The command may have run long enough for someone to force-release
+        # and re-claim this resource; only drop the lock if it's still ours.
+        owner = a.owner or default_owner()
+        rec = read_lock(lock_path(a.resource))
+        if rec and rec.get("owner") == owner:
+            try:
+                lock_path(a.resource).unlink()
+            except FileNotFoundError:
+                pass
+            print(f"released {a.resource}", file=sys.stderr)
+        elif rec:
+            print(f"left {a.resource} alone: now held by {rec.get('owner')}",
+                  file=sys.stderr)
 
 
 def cmd_watch(a):
@@ -576,7 +625,7 @@ def main():
     sp.set_defaults(fn=cmd_release)
 
     sp = sub.add_parser("status", help="show the ledger (all, or one resource)")
-    sp.add_argument("resource", nargs="?")
+    sp.add_argument("resource", nargs="?", help="a resource or group tag")
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--xbar", action="store_true",
                     help="xbar/SwiftBar plugin output")

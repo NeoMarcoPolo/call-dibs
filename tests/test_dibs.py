@@ -119,6 +119,12 @@ class DibsTest(unittest.TestCase):
         self.assertEqual(self.dibs("release", "bench").returncode, 0)
         self.assertEqual(self.holders(), {})
 
+    def test_group_tag_cannot_reuse_a_resource_name(self):
+        out = self.dibs("claim", "phone", "c2", "--as", "gpu")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("group name 'gpu' is a resource name", out.stderr)
+        self.assertEqual(self.holders(), {})
+
     def test_auto_group_tag(self):
         out = self.dibs("claim", "phone", "c2").stdout
         tag = next(l.split()[1].rstrip(":") for l in out.splitlines() if l.startswith("group "))
@@ -143,6 +149,24 @@ class DibsTest(unittest.TestCase):
         self.assertEqual(out.returncode, 7)
         self.assertEqual(self.holders(), {})
 
+    def test_run_releases_only_the_lock_it_still_holds(self):
+        # The child force-releases gpu as owner x, then re-claims it as owner
+        # y: `run`'s original claim (owner a) is no longer the current
+        # holder, so its finally-block must leave the new claim alone.
+        child = (
+            "import os, sys, subprocess\n"
+            f"DIBS = {DIBS!r}\n"
+            "subprocess.run([sys.executable, DIBS, 'release', 'gpu', '--force'],\n"
+            "               env=dict(os.environ, DIBS_OWNER='x'), check=True)\n"
+            "subprocess.run([sys.executable, DIBS, 'claim', 'gpu'],\n"
+            "               env=dict(os.environ, DIBS_OWNER='y'), check=True)\n"
+        )
+        out = self.dibs("run", "gpu", "--", sys.executable, "-c", child)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("left gpu alone: now held by y", out.stderr)
+        self.assertNotIn("released gpu", out.stderr)
+        self.assertEqual(self.holders(), {"gpu": "y"})
+
     def test_wait_timeout(self):
         self.dibs("claim", "gpu")
         out = self.dibs("wait", "gpu", "--timeout", "1", "--poll", "1")
@@ -155,6 +179,14 @@ class DibsTest(unittest.TestCase):
         self.assertEqual(out.returncode, 2)
         self.assertIn("gpu: free, but next in line is b", out.stderr)
         self.assertEqual(self.holders(), {})
+
+    def test_wait_keeps_polling_when_the_queue_dir_cannot_be_joined(self):
+        (self.dir / "queue").write_text("")  # a file where a dir belongs
+        self.dibs("claim", "gpu", owner="other")
+        out = self.dibs("claim", "gpu", "--wait", "--timeout", "2", "--poll", "1")
+        self.assertEqual(out.returncode, 4)
+        self.assertIn("not queued", out.stderr)
+        self.assertEqual(self.dibs("status").returncode, 0)
 
     def test_waiter_that_could_go_reserves_its_devices(self):
         self.ticket("g", "phone", "c2")
@@ -181,8 +213,32 @@ class DibsTest(unittest.TestCase):
         q.mkdir()
         (q / "junk.json").write_text("not json")
         (q / "partial.json").write_text(json.dumps({"id": "x", "owner": "b"}))
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        def bad(name, **overrides):
+            rec = {"id": "z", "owner": "b", "resources": ["gpu"], "note": None,
+                   "host": "test", "since": now, "t": time.time(), "poll": 5}
+            rec.update(overrides)
+            (q / f"{name}.json").write_text(json.dumps(rec))
+
+        bad("dict-resources", resources=[{"name": "gpu"}])
+        bad("nested-list-resources", resources=[["gpu"]])
+        bad("int-resources", resources=[1])
+        bad("null-resources", resources=[None])
+        bad("null-id", id=None)
+        (self.dir / "slider.lock.json").write_text(json.dumps([1, 2]))
+
+        junk_paths = sorted(q.glob("*.json"))
+        old = time.time() - 60
+        for p in junk_paths:
+            os.utime(p, (old, old))  # back-dated past STALE: must still be left alone
+
         self.assertEqual(self.dibs("claim", "gpu").returncode, 0)
         self.assertEqual(self.dibs("status").returncode, 0)
+        self.assertEqual(self.dibs("status", "--json").returncode, 0)
+        self.assertEqual(self.dibs("status", "--xbar").returncode, 0)
+        self.assertEqual(self.holders(), {"gpu": "a"})
+        self.assertEqual(sorted(q.glob("*.json")), junk_paths)  # none deleted
 
     def test_waiters_get_their_turn_oldest_first(self):
         self.dibs("claim", "gpu")
@@ -260,12 +316,27 @@ class DibsTest(unittest.TestCase):
         self.assertEqual(rows["phone"]["waiting"][0]["resources"], ["gpu", "phone"])
         self.assertNotIn("waiting", rows["c2"])
 
+    def test_status_of_unknown_name_with_json_prints_empty_list(self):
+        self.assertEqual(json.loads(self.dibs("status", "nope", "--json").stdout), [])
+
     def test_status_of_a_group_tag_lists_its_members(self):
         self.dibs("claim", "phone", "c2", "--as", "bench")
         text = self.dibs("status", "bench").stdout
         self.assertIn("c2: held by a", text)
         self.assertIn("phone: held by a", text)
         self.assertNotIn("gpu", text)
+
+    def test_xbar_output_cannot_be_broken_or_injected_via_ledger_text(self):
+        evil_note = "a | b\n--Force release phone… | bash=/usr/bin/say hi"
+        self.dibs("claim", "gpu", "--note", evil_note)
+        out = self.dibs("status", "--xbar",
+                        SWIFTBAR_PLUGIN_PATH="/x/dibs.5s.sh").stdout
+        lines = out.splitlines()
+        dash_lines = [l for l in lines if l.startswith("--") and l != "---"]
+        self.assertEqual(len(dash_lines), 1)
+        self.assertIn("Force release gpu", dash_lines[0])
+        gpu_row = next(l for l in lines if l.startswith("gpu —"))
+        self.assertEqual(gpu_row.count("|"), 1)
 
     def test_menu_bar_offers_force_release_only_under_swiftbar(self):
         self.assertTrue(self.dibs("status", "--xbar").stdout.startswith("dibs ✓\n"))
