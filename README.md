@@ -68,7 +68,7 @@ Only these names can be claimed, so a typo can't silently create a new lock.
 |---|---|
 | `dibs claim <r...> [--note ...] [--wait [--timeout N]]` | claim one or more resources. Exit `2` + holder info if busy; `--wait` waits in line |
 | `dibs release <r...> [--force]` | release |
-| `dibs status [r|group] [--json]` | who has what (a group tag shows its members) |
+| `dibs status [r\|group] [--json]` | who has what (a group tag shows its members) |
 | `dibs wait <r...> [--timeout N]` | block until free, without claiming |
 | `dibs run <r> -- <cmd...>` | claim → run → always release |
 | `dibs watch` | live terminal view |
@@ -123,7 +123,8 @@ shows the line under each resource; `--json` rows gain a `waiting` list.
 
 `skills/dibs/` is a drop-in skill for Claude Code (and reads fine as an
 `AGENTS.md` snippet for anything else). It teaches the protocol: claim before
-touching hardware, one call per set, release when done, never force-break
+touching hardware, one call per set, wait in line instead of retrying, release
+as soon as you stop driving it (even to wait on a human), never force-break
 someone else's lock.
 
 ```sh

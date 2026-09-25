@@ -17,10 +17,10 @@ never touch shared hardware you haven't claimed.
    DIBS_OWNER="agent:<task-slug>" dibs claim phone-a --note "why"
    ```
    - exit `0` → yours. exit `2` → BUSY; stderr says who has it, since when, why.
-   - On BUSY: do other prep and retry, or wait in line with
-     `--wait --timeout 1800` (exit `4` on timeout). You keep your place
-     only while that command runs — run it as a background job if your
-     shell kills long commands, and don't loop claim/timeout/retry (every
+   - On BUSY: join the line and keep working — run the same claim with
+     `--wait` (no `--timeout`) as a background job and do other prep while
+     it waits; it exits `0` once the resources are yours. You keep your
+     place only while that command runs, so don't loop claim/retry (every
      retry starts at the back). BUSY can also say a free resource is next
      in line for someone who waited longer. Never `release --force`
      someone else's lock — report the holder to the user instead.
@@ -31,14 +31,19 @@ never touch shared hardware you haven't claimed.
    ```
    One call is all-or-nothing and can't half-block another agent. Claiming
    members one by one can.
-3. **Release the moment hardware work ends** — not after analysis, not at
-   the end of the session. Release by name or by group tag:
+3. **Release the moment you stop driving the hardware** — not after
+   analysis, not at the end of the session, and not while you wait on a
+   human. Before you report back, ask a question, or otherwise hand the
+   turn over, release; claim again (joining the line) when you resume.
+   Keep a lock across a pause only when letting go mid-way would break
+   something (say, a flash in progress), and say so. Release by name or
+   by group tag:
    ```bash
    DIBS_OWNER="agent:<slug>" dibs release g-3fa2c1
    ```
 4. **Single bounded command → use the wrapper** (releases even on failure):
    ```bash
-   dibs run --note "smoke" gpu-0 -- python train.py --smoke
+   DIBS_OWNER="agent:<slug>" dibs run --note "smoke" gpu-0 -- python train.py --smoke
    ```
    (dibs flags go before the resource; the command after `--`.)
 
