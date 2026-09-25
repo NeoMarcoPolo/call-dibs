@@ -32,6 +32,7 @@ import getpass
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import time
@@ -263,11 +264,61 @@ def take_all(resources, owner, note, group):
     return None
 
 
+def write_ticket(t):
+    """Atomically (re)write a waiter's ticket."""
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    path = QUEUE / f"{t['id']}.json"
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(t, indent=2))
+    os.replace(tmp, path)
+    return path
+
+
+def join_line(resources, owner, note, poll):
+    t = {"id": os.urandom(4).hex(), "owner": owner, "resources": resources,
+         "note": note or None, "host": socket.gethostname().split(".")[0],
+         "since": now_iso(), "t": time.time(), "poll": poll}
+    write_ticket(t)
+    return t
+
+
+def heartbeat(t):
+    """Keep our place. If a reader dropped the ticket as stale (say the
+    laptop slept), put it back with its original place."""
+    try:
+        os.utime(QUEUE / f"{t['id']}.json")
+    except FileNotFoundError:
+        write_ticket(t)
+    except OSError:
+        pass  # e.g. Windows while a reader has it open; the next beat will do
+
+
+def leave_line(t):
+    try:
+        (QUEUE / f"{t['id']}.json").unlink()
+    except OSError:
+        pass
+
+
+def ahead_of(t):
+    """Live waiters older than `t` that want any of the same devices."""
+    return sum(1 for o in live_tickets()
+               if (o["t"], str(o["id"])) < (t["t"], t["id"])
+               and set(o["resources"]) & set(t["resources"]))
+
+
+def _exit_on_term(signum, frame):
+    raise SystemExit(128 + signum)  # so `finally` drops the ticket
+
+
 def cmd_claim(a):
     """All-or-nothing: on any BUSY, locks newly taken by this call are rolled
     back (sorted claim order keeps overlapping sets deadlock-free). Claiming
     several resources at once forms a group — a tag stamped on each lock —
-    so the whole set can later be discarded with `dibs release <group>`."""
+    so the whole set can later be discarded with `dibs release <group>`.
+
+    With --wait a blocked claim joins the line (see next_in_line) and keeps
+    its place only while this process runs."""
     resources = check_names(a.resources)
     owner = a.owner or default_owner()
     group = getattr(a, "as_group", None)
@@ -276,22 +327,36 @@ def cmd_claim(a):
     if group and not NAME_RE.match(group):
         raise SystemExit(f"dibs: bad group name {group!r}")
     deadline = time.time() + a.timeout if a.timeout else None
-    while True:
-        why = busy_reason(resources, owner) or take_all(resources, owner, a.note, group)
-        if why is None:
-            for r in resources:
-                print(f"claimed {r} as {owner}")
-            if group:
-                print(f"group {group}: {', '.join(resources)} "
-                      f"(discard with: dibs release {group})")
-            return 0
-        if not a.wait:
-            print("BUSY " + why, file=sys.stderr)
-            return 2
-        if deadline and time.time() > deadline:
-            print("timeout waiting; " + why, file=sys.stderr)
-            return 4
-        time.sleep(a.poll)
+    ticket = None
+    try:
+        while True:
+            why = (busy_reason(resources, owner, ticket and ticket["id"])
+                   or take_all(resources, owner, a.note, group))
+            if why is None:
+                for r in resources:
+                    print(f"claimed {r} as {owner}")
+                if group:
+                    print(f"group {group}: {', '.join(resources)} "
+                          f"(discard with: dibs release {group})")
+                return 0
+            if not a.wait:
+                print("BUSY " + why, file=sys.stderr)
+                return 2
+            if deadline and time.time() > deadline:
+                print("timeout waiting; " + why, file=sys.stderr)
+                return 4
+            if ticket is None:
+                signal.signal(signal.SIGTERM, _exit_on_term)
+                ticket = join_line(resources, owner, a.note, a.poll)
+                print(f"queued for {', '.join(resources)} — {why}; "
+                      f"{ahead_of(ticket)} ahead", file=sys.stderr)
+            else:
+                heartbeat(ticket)
+            time.sleep(a.poll)
+    finally:
+        if ticket:
+            leave_line(ticket)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)  # `run` keeps 0.3 behaviour
 
 
 def resolve_targets(names):
