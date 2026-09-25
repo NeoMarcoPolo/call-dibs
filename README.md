@@ -68,7 +68,7 @@ Only these names can be claimed, so a typo can't silently create a new lock.
 |---|---|
 | `dibs claim <r...> [--note ...] [--wait [--timeout N]]` | claim one or more resources. Exit `2` + holder info if busy; `--wait` waits in line |
 | `dibs release <r...> [--force]` | release |
-| `dibs status [r] [--json]` | who has what |
+| `dibs status [r|group] [--json]` | who has what (a group tag shows its members) |
 | `dibs wait <r...> [--timeout N]` | block until free, without claiming |
 | `dibs run <r> -- <cmd...>` | claim → run → always release |
 | `dibs watch` | live terminal view |
