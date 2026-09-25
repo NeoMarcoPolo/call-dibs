@@ -17,8 +17,12 @@ never touch shared hardware you haven't claimed.
    DIBS_OWNER="agent:<task-slug>" dibs claim phone-a --note "why"
    ```
    - exit `0` → yours. exit `2` → BUSY; stderr says who has it, since when, why.
-   - On BUSY: do other prep and retry, or block with
-     `--wait --timeout 1800` (exit `4` on timeout). Never `release --force`
+   - On BUSY: do other prep and retry, or wait in line with
+     `--wait --timeout 1800` (exit `4` on timeout). You keep your place
+     only while that command runs — run it as a background job if your
+     shell kills long commands, and don't loop claim/timeout/retry (every
+     retry starts at the back). BUSY can also say a free resource is next
+     in line for someone who waited longer. Never `release --force`
      someone else's lock — report the holder to the user instead.
 2. **Need several things at once? Claim them in ONE call.**
    ```bash
@@ -40,7 +44,8 @@ never touch shared hardware you haven't claimed.
 
 ## Checks
 
-- `dibs status` — whole ledger; `dibs status --json` for parsing.
+- `dibs status` — whole ledger, including who's waiting (`queue:` lines);
+  `dibs status --json` for parsing.
 - Unknown name rejected? Only names in `~/.dibs/resources.json` exist — use
   what `dibs status` lists; ask the user before adding a resource.
 - If your session is ending and you still hold locks, release them first.

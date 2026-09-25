@@ -66,7 +66,7 @@ Only these names can be claimed, so a typo can't silently create a new lock.
 
 | command | what it does |
 |---|---|
-| `dibs claim <r...> [--note ...] [--wait [--timeout N]]` | claim one or more resources. Exit `2` + holder info if busy |
+| `dibs claim <r...> [--note ...] [--wait [--timeout N]]` | claim one or more resources. Exit `2` + holder info if busy; `--wait` waits in line |
 | `dibs release <r...> [--force]` | release |
 | `dibs status [r] [--json]` | who has what |
 | `dibs wait <r...> [--timeout N]` | block until free, without claiming |
@@ -106,6 +106,19 @@ $ dibs release g-3fa2c1
 
 Name the group yourself with `--as NAME`.
 
+### Waiting in line
+
+`claim --wait` takes a place in line. When something frees up, the
+longest waiter that can use it goes first, and a claim without `--wait`
+can't jump ahead of it — it gets `BUSY … free, but next in line is …`.
+A waiter still blocked on something else doesn't hold up devices it isn't
+using yet, so a big multi-resource claim can still lose its turn to
+smaller ones.
+
+Your place lasts only while the wait is running: time out, Ctrl-C, or get
+killed and you're out of line (a retry starts at the back). `dibs status`
+shows the line under each resource; `--json` rows gain a `waiting` list.
+
 ## For AI agents
 
 `skills/dibs/` is a drop-in skill for Claude Code (and reads fine as an
@@ -119,9 +132,11 @@ cp -r skills/dibs ~/.claude/skills/
 
 ## Menu bar (macOS)
 
-See the ledger at a glance: `dibs ✋2` in the top bar when two things are
-claimed, `dibs ✓` when everything is free, and who-has-what in the dropdown.
-Install [SwiftBar](https://swiftbar.app), then add the plugin:
+See the ledger at a glance: `dibs ✋2 ⏳1` in the top bar when two things
+are claimed and one claim is waiting, `dibs ✓` when everything is free,
+and who-has-what in the dropdown. Under SwiftBar each claimed resource
+also has **Force release…**, behind a confirm dialog — for holders that
+are gone. Install [SwiftBar](https://swiftbar.app), then add the plugin:
 
 ```sh
 open "swiftbar://addplugin?src=https://raw.githubusercontent.com/NeoMarcoPolo/call-dibs/main/contrib/dibs.5s.sh"
@@ -136,7 +151,9 @@ login item if you'd rather have it always there.)
 One JSON file per resource under `~/.dibs/` (override with `DIBS_DIR`). A
 claim is an atomic `O_CREAT|O_EXCL` create, so racing claimers get exactly
 one winner. Locks are advisory and are held until released — there is no
-expiry. The ledger is per-machine by default; point `DIBS_DIR` at a shared
+expiry. A waiting claim keeps a small ticket in `~/.dibs/queue/` and refreshes it
+every poll; a ticket that goes 15 s without a refresh is dropped, so a
+waiter that died never blocks the line. The ledger is per-machine by default; point `DIBS_DIR` at a shared
 directory to span machines.
 
 ## Contributing

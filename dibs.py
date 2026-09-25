@@ -25,6 +25,11 @@ a group (auto-named, or `--as NAME`); release the group to drop them all:
     dibs claim phone-a gpu-0      ->  group g-3fa2c1: gpu-0, phone-a
     dibs release g-3fa2c1
 
+`claim --wait` waits in line: waiters get their turn oldest first, and a
+claim without --wait can't jump ahead of one. A waiter still blocked on
+something else doesn't hold up devices it isn't using yet. Its place lasts
+only while the wait runs.
+
 Exit codes:  0 ok · 2 busy · 3 not held by you · 4 wait timeout · 1 error
 """
 import argparse
@@ -39,7 +44,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
 QUEUE = LEDGER / "queue"  # one ticket per waiting claim
@@ -553,7 +558,7 @@ def main():
                         help="name the group (default: auto g-xxxxxx when "
                              "claiming several resources)")
         sp.add_argument("--owner", help="override owner id (or set $DIBS_OWNER)")
-        sp.add_argument("--wait", action="store_true", help="block until claimable")
+        sp.add_argument("--wait", action="store_true", help="wait in line until claimable")
         sp.add_argument("--timeout", type=int,
                         help="give up after N seconds (with --wait)")
         sp.add_argument("--poll", type=int, default=5, help="poll interval seconds")
