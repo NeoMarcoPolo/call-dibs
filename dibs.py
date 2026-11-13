@@ -44,11 +44,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
 QUEUE = LEDGER / "queue"  # one ticket per waiting claim
 STALE = 15  # seconds without a heartbeat before a waiter counts as gone
+UNLINK_WAIT = 10  # seconds a release waits out readers holding the lock open (Windows)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
@@ -90,6 +91,31 @@ def read_lock(path):
         return json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+
+
+def unlink_lock(path):
+    """Delete a lock file; a lock that is already gone is fine.
+
+    Windows refuses to delete a file while another process has it open
+    without FILE_SHARE_DELETE, and Python's open() never passes that flag.
+    So anything reading the lock (a `claim --wait` polling it, `status`, a
+    script reading the JSON) makes a release fail with a sharing violation
+    (WinError 32) for the instant it reads. Readers hold the file for well
+    under a millisecond: wait them out. Anything else, or a file still busy
+    after UNLINK_WAIT seconds, raises."""
+    deadline = time.monotonic() + UNLINK_WAIT
+    delay = 0.01
+    while True:
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as e:
+            if getattr(e, "winerror", None) != 32 or time.monotonic() > deadline:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 0.5)
 
 
 def registry():
@@ -282,10 +308,7 @@ def take_all(resources, owner, note, group):
             got.append(r)
         elif res != "yours":
             for g in got:  # roll back this call's partial set
-                try:
-                    lock_path(g).unlink()
-                except FileNotFoundError:
-                    pass
+                unlink_lock(lock_path(g))
             return holder_line(r, res)
     return None
 
@@ -428,12 +451,17 @@ def cmd_release(a):
         if rec.get("owner") != owner and not a.force:
             print(f"NOT YOURS {holder_line(resource, rec)}\n"
                   f"(you are {owner}; use --force to break it)", file=sys.stderr)
-            rc = 3
+            rc = rc or 3
             continue
         try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+            unlink_lock(path)
+        except OSError as e:
+            # 1 outranks 3: a caller that shrugs off NOT YOURS must still
+            # see that a lock it owns is still on the ledger.
+            print(f"dibs: could not release {resource}, still held by "
+                  f"{rec.get('owner')}: {e}", file=sys.stderr)
+            rc = 1
+            continue
         verb = "broke" if rec.get("owner") != owner else "released"
         print(f"{verb} {resource} (was {rec.get('owner')})")
     return rc
@@ -560,8 +588,9 @@ def cmd_run(a):
     rc = cmd_claim(a)
     if rc != 0:
         return rc
+    rc = 1
     try:
-        return subprocess.call(argv)
+        rc = subprocess.call(argv)
     finally:
         # The command may have run long enough for someone to force-release
         # and re-claim this resource; only drop the lock if it's still ours.
@@ -569,13 +598,17 @@ def cmd_run(a):
         rec = read_lock(lock_path(a.resource))
         if isinstance(rec, dict) and rec.get("owner") == a.owner:
             try:
-                lock_path(a.resource).unlink()
-            except FileNotFoundError:
-                pass
-            print(f"released {a.resource}", file=sys.stderr)
+                unlink_lock(lock_path(a.resource))
+                print(f"released {a.resource}", file=sys.stderr)
+            except OSError as e:
+                print(f"dibs run: could not release {a.resource}: {e}\n"
+                      f"(release it with: dibs release {a.resource} --owner {a.owner})",
+                      file=sys.stderr)
+                rc = rc or 1  # a lock left behind is not a clean exit
         elif isinstance(rec, dict):
             print(f"left {a.resource} alone: now held by {rec.get('owner')}",
                   file=sys.stderr)
+    return rc
 
 
 def cmd_watch(a):
