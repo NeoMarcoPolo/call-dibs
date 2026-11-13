@@ -49,7 +49,7 @@ __version__ = "0.4.1"
 LEDGER = Path(os.environ.get("DIBS_DIR", Path.home() / ".dibs"))
 QUEUE = LEDGER / "queue"  # one ticket per waiting claim
 STALE = 15  # seconds without a heartbeat before a waiter counts as gone
-UNLINK_WAIT = 10  # seconds a release waits out readers holding the lock open (Windows)
+BUSY_WAIT = 10  # seconds to wait out another process holding a lock file (Windows)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
@@ -86,36 +86,47 @@ def lock_path(resource):
     return LEDGER / f"{resource}.lock.json"
 
 
+def wait_out_busy(op):
+    """Return op(), waiting out another process that holds a lock file for an
+    instant (Windows).
+
+    Windows refuses to delete a file while another process has it open
+    without FILE_SHARE_DELETE, and Python's open() never passes that flag;
+    it also refuses to open a file while another process is deleting it.
+    So a release that lands while anything reads the lock (a `claim --wait`
+    polling it, `status`, a script reading the JSON) fails, and so does a
+    read that lands while someone else releases. Both hold the file for well
+    under a millisecond: wait them out. A file still busy after BUSY_WAIT
+    seconds raises, and so does anything else."""
+    deadline = time.monotonic() + BUSY_WAIT
+    delay = 0.01
+    while True:
+        try:
+            return op()
+        except PermissionError as e:
+            # unlink reports the sharing violation itself (WinError 32);
+            # open() goes through the C runtime, which turns it into a bare
+            # EACCES with no winerror.
+            if (os.name != "nt" or getattr(e, "winerror", None) not in (32, None)
+                    or time.monotonic() > deadline):
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 0.5)
+
+
 def read_lock(path):
     try:
-        return json.loads(path.read_text())
+        return json.loads(wait_out_busy(path.read_text))
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
 
 def unlink_lock(path):
-    """Delete a lock file; a lock that is already gone is fine.
-
-    Windows refuses to delete a file while another process has it open
-    without FILE_SHARE_DELETE, and Python's open() never passes that flag.
-    So anything reading the lock (a `claim --wait` polling it, `status`, a
-    script reading the JSON) makes a release fail with a sharing violation
-    (WinError 32) for the instant it reads. Readers hold the file for well
-    under a millisecond: wait them out. Anything else, or a file still busy
-    after UNLINK_WAIT seconds, raises."""
-    deadline = time.monotonic() + UNLINK_WAIT
-    delay = 0.01
-    while True:
-        try:
-            path.unlink()
-            return
-        except FileNotFoundError:
-            return
-        except PermissionError as e:
-            if getattr(e, "winerror", None) != 32 or time.monotonic() > deadline:
-                raise
-        time.sleep(delay)
-        delay = min(delay * 2, 0.5)
+    """Delete a lock file; a lock that is already gone is fine."""
+    try:
+        wait_out_busy(path.unlink)
+    except FileNotFoundError:
+        pass
 
 
 def registry():
