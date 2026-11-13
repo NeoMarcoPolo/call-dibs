@@ -3,7 +3,7 @@
 
 A tiny advisory lock ledger for physical resources shared by humans and AI
 agents: test phones, GPUs, staging environments, the label printer. One JSON
-file per resource. No daemon, no dependencies — Python 3.8+ stdlib only.
+file per resource. No daemon, no dependencies — Python 3.9+ stdlib only.
 macOS / Linux / Windows.
 
     dibs claim gpu-0 --note "training run"

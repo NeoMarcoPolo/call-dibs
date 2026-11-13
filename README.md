@@ -8,7 +8,7 @@ A tiny lock ledger so humans and AI agents stop fighting over the same phone, GP
 
 [![CI](https://github.com/NeoMarcoPolo/call-dibs/actions/workflows/ci.yml/badge.svg)](https://github.com/NeoMarcoPolo/call-dibs/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/call-dibs)](https://pypi.org/project/call-dibs/)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
